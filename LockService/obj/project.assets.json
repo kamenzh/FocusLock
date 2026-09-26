@@ -603,6 +603,16 @@
             "rid": "win"
           }
         }
+      },
+      "Shared/1.0.0": {
+        "type": "project",
+        "framework": ".NETCoreApp,Version=v9.0",
+        "compile": {
+          "bin/placeholder/Shared.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/Shared.dll": {}
+        }
       }
     }
   },
@@ -1478,11 +1488,17 @@
         "system.diagnostics.eventlog.nuspec",
         "useSharedDesignerContext.txt"
       ]
+    },
+    "Shared/1.0.0": {
+      "type": "project",
+      "path": "../Shared/Shared.csproj",
+      "msbuildProject": "../Shared/Shared.csproj"
     }
   },
   "projectFileDependencyGroups": {
     "net9.0": [
-      "Microsoft.Extensions.Hosting >= 9.0.0"
+      "Microsoft.Extensions.Hosting >= 9.0.0",
+      "Shared >= 1.0.0"
     ]
   },
   "packageFolders": {
@@ -1492,11 +1508,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "C:\\Users\\MSI\\OneDrive\\Desktop\\kamen\\programirane\\focus lock\\BrotherPCControl\\LockService\\LockService.csproj",
+      "projectUniqueName": "C:\\Users\\MSI\\OneDrive\\Desktop\\kamen\\programirane\\focuslock\\LockService\\LockService.csproj",
       "projectName": "LockService",
-      "projectPath": "C:\\Users\\MSI\\OneDrive\\Desktop\\kamen\\programirane\\focus lock\\BrotherPCControl\\LockService\\LockService.csproj",
+      "projectPath": "C:\\Users\\MSI\\OneDrive\\Desktop\\kamen\\programirane\\focuslock\\LockService\\LockService.csproj",
       "packagesPath": "C:\\Users\\MSI\\.nuget\\packages\\",
-      "outputPath": "C:\\Users\\MSI\\OneDrive\\Desktop\\kamen\\programirane\\focus lock\\BrotherPCControl\\LockService\\obj\\",
+      "outputPath": "C:\\Users\\MSI\\OneDrive\\Desktop\\kamen\\programirane\\focuslock\\LockService\\obj\\",
       "projectStyle": "PackageReference",
       "fallbackFolders": [
         "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
@@ -1516,7 +1532,11 @@
       "frameworks": {
         "net9.0": {
           "targetAlias": "net9.0",
-          "projectReferences": {}
+          "projectReferences": {
+            "C:\\Users\\MSI\\OneDrive\\Desktop\\kamen\\programirane\\focuslock\\Shared\\Shared.csproj": {
+              "projectPath": "C:\\Users\\MSI\\OneDrive\\Desktop\\kamen\\programirane\\focuslock\\Shared\\Shared.csproj"
+            }
+          }
         }
       },
       "warningProperties": {

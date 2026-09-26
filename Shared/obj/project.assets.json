@@ -14,11 +14,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "C:\\Users\\MSI\\OneDrive\\Desktop\\kamen\\programirane\\focus lock\\BrotherPCControl\\Shared\\Shared.csproj",
+      "projectUniqueName": "C:\\Users\\MSI\\OneDrive\\Desktop\\kamen\\programirane\\focuslock\\Shared\\Shared.csproj",
       "projectName": "Shared",
-      "projectPath": "C:\\Users\\MSI\\OneDrive\\Desktop\\kamen\\programirane\\focus lock\\BrotherPCControl\\Shared\\Shared.csproj",
+      "projectPath": "C:\\Users\\MSI\\OneDrive\\Desktop\\kamen\\programirane\\focuslock\\Shared\\Shared.csproj",
       "packagesPath": "C:\\Users\\MSI\\.nuget\\packages\\",
-      "outputPath": "C:\\Users\\MSI\\OneDrive\\Desktop\\kamen\\programirane\\focus lock\\BrotherPCControl\\Shared\\obj\\",
+      "outputPath": "C:\\Users\\MSI\\OneDrive\\Desktop\\kamen\\programirane\\focuslock\\Shared\\obj\\",
       "projectStyle": "PackageReference",
       "fallbackFolders": [
         "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"

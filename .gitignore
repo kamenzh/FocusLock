@@ -1,0 +1,98 @@
+# Build output
+
+bin/
+obj/
+out/
+publish/
+
+# Visual Studio
+
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# JetBrains Rider
+
+.idea/
+*.sln.iml
+
+# VS Code
+
+.vscode/
+
+# Test output
+
+TestResults/
+coverage/
+coverage.*
+*.coverage
+*.coveragexml
+
+# NuGet
+
+*.nupkg
+*.snupkg
+packages/
+
+# Logs
+
+*.log
+logs/
+
+# Temporary files
+
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# Windows
+
+Thumbs.db
+Desktop.ini
+
+# macOS
+
+.DS_Store
+
+# Local application state
+
+state.json
+lockstate.json
+
+# Local development configuration
+
+appsettings.Development.json
+appsettings.Local.json
+
+# Secrets / certificates
+
+*.pfx
+*.p12
+*.key
+*.pem
+*.crt
+*.cer
+secrets.json
+
+# Environment files
+
+.env
+.env.*
+!.env.example
+
+# Generated runtime data
+
+data/
+runtime/
+
+# Publish artifacts
+
+artifacts/
+
+# Local FocusLock files
+
+FocusLock.local.json
+BrotherPCControl.local.json
