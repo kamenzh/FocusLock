@@ -48,8 +48,7 @@ public sealed class JsonLockStateStore(ServiceSettings settings, ILogger<JsonLoc
                 await stream.FlushAsync(cancellationToken);
                 stream.Flush(flushToDisk: true);
             }
-            if (File.Exists(path)) File.Replace(temporaryPath, path, null);
-            else File.Move(temporaryPath, path);
+            File.Move(temporaryPath, path, overwrite: true);
         }
         finally { if (File.Exists(temporaryPath)) File.Delete(temporaryPath); }
     }
