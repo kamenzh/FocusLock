@@ -1,23 +1,21 @@
 namespace LockService;
 
-public class Worker : BackgroundService
+public sealed class Worker(LockManager manager, ILogger<Worker> logger) : BackgroundService
 {
-    private readonly ILogger<Worker> _logger;
-
-    public Worker(ILogger<Worker> logger)
-    {
-        _logger = logger;
-    }
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        while (!stoppingToken.IsCancellationRequested)
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        try
         {
-            if (_logger.IsEnabled(LogLevel.Information))
+            while (await timer.WaitForNextTickAsync(stoppingToken))
             {
-                _logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
+                try { await manager.ExpireAsync(stoppingToken); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    logger.LogError(exception, "Unable to persist expiration; will retry");
+                }
             }
-            await Task.Delay(1000, stoppingToken);
         }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
     }
 }

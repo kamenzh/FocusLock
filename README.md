@@ -1,295 +1,130 @@
-# FocusLock
+# FocusLock — development timer preview
 
-FocusLock is a Windows 11 PC time-management project built with C# and .NET.
+This phase records a lock timer only. It does **not** lock Windows, disable accounts,
+log users off, alter security settings, create firewall rules, or execute commands.
+The existing `BrotherPCControl.sln` and projects remain on .NET 9.
 
-It is designed to let an administrator temporarily restrict access to a specific Standard Windows user account from another computer on the same local network.
+## Architecture
 
-The project is currently being developed in stages so that networking, timers, persistence, authentication, and Windows account management can each be tested safely before being combined.
+- **Shared** contains `LockRequest`, `LockStatus`, and `ApiResult` DTOs.
+- **LockService** hosts an ASP.NET Core API and a `BackgroundService` that checks
+  expiration once per second. It can run as a console process or under the Windows
+  Service host lifetime. No service installation is required for this preview.
+- **LockController** is a WPF client using one `HttpClient`, asynchronous requests,
+  and a one-second polling timer. It reconnects automatically and cancels polling
+  on close. A disconnected service is shown as UNKNOWN, never as unlocked.
+- **LockService.Tests** tests the real JSON store with isolated temporary directories
+  and an injected fake clock, so expiration tests do not wait for real minutes.
 
-## Project Structure
+`LockManager` serializes state changes, writes successfully before accepting a lock,
+and derives remaining time from an absolute UTC deadline. `IClock` and
+`ILockStateStore` are injected. A new request replaces the deadline with the current
+UTC time plus its duration, even if another timer is active.
 
-```text
-FocusLock/
-├── BrotherPCControl.sln
-├── LockService/
-├── LockController/
-├── Shared/
-└── README.md
-```
+The JSON file contains `schemaVersion`, `locked`, and `lockUntilUtc`. Writes use a
+unique temporary file in the same directory, flush it to disk, then replace the
+existing file atomically (or rename on first creation). Missing state starts unlocked;
+expired state is cleared on startup; malformed or unsupported state is logged and
+starts unlocked. Corrupt files are replaced on the next successful lock request.
+Other disk/permission errors are surfaced rather than silently losing an active timer.
 
-### LockService
+## Build and test
 
-`LockService` runs on the computer being controlled.
-
-Its responsibilities will include:
-
-* receiving lock requests
-* storing lock expiration times
-* restoring active lock state after a restart
-* automatically ending locks when their timer expires
-* eventually managing the configured Windows Standard user account
-
-### LockController
-
-`LockController` is the desktop application used by the administrator.
-
-It will provide controls such as:
-
-* 15 minute lock
-* 30 minute lock
-* 1 hour lock
-* 2 hour lock
-* custom lock duration
-* connection status
-* remaining lock time
-* lock expiration time
-
-### Shared
-
-`Shared` contains models and DTOs used by both the controller and service.
-
-Examples include:
-
-```text
-LockRequest
-LockStatus
-ApiResult
-```
-
-## Requirements
-
-* Windows 11
-* .NET 9 SDK
-* Visual Studio, Rider, VS Code, or another C# editor
-* PowerShell or Windows Terminal
-
-Check your installed .NET version with:
+Use Windows with the .NET 9 SDK and desktop runtime. From the repository root:
 
 ```powershell
-dotnet --version
+dotnet restore BrotherPCControl.sln
+dotnet build BrotherPCControl.sln
+dotnet test BrotherPCControl.sln
 ```
 
-## Building
-
-Clone the repository:
+## Run the service
 
 ```powershell
-git clone https://github.com/kamenzh/FocusLock.git
-cd FocusLock
+dotnet run --project LockService --launch-profile LockService
 ```
 
-Restore packages:
+The development launch profile selects `appsettings.Development.json`, which stores
+state in `%LOCALAPPDATA%\FocusLock\state.json` without needing administrator rights.
+The service logs its listener and responds at `http://127.0.0.1:42831`.
+
+Normal non-development configuration uses `%ProgramData%\FocusLock\state.json`
+(normally `C:\ProgramData\FocusLock\state.json`). The service identity must have
+write permission to that directory. To run with normal configuration in a fresh shell:
 
 ```powershell
-dotnet restore
+dotnet run --project LockService --no-launch-profile
 ```
 
-Build the solution:
+Configure `Service:ListenAddress`, `Service:Port`, and `Service:StateDirectory` in
+the service settings files, via environment variables such as `Service__Port`,
+or command-line arguments. The state directory must be absolute after environment
+variable expansion. For example:
 
 ```powershell
-dotnet build
+dotnet run --project LockService --launch-profile LockService -- --Service:StateDirectory="$env:LOCALAPPDATA\FocusLock-Dev"
 ```
 
-If tests exist:
+Only loopback IP addresses are accepted. Defaults are `127.0.0.1` and port `42831`.
+Additional `Kestrel:Endpoints` configuration is rejected; URL environment variables
+do not replace the explicit loopback listener. Run one service process per state
+directory. This preview has no authentication and is intended for local testing only.
+
+## Run the controller
+
+In a second terminal:
 
 ```powershell
-dotnet test
+dotnet run --project LockController
 ```
 
-## Running During Development
+`LockController/appsettings.json` defines `TargetHostname` and `Port`, defaulting to
+`127.0.0.1` and `42831`. It is copied beside the controller executable. Restart the
+controller after changing configuration. Keep the target local for this phase.
 
-Start the service:
+## API
+
+- `GET /api/health`: HTTP 200 with `{ "success": true, "message": "..." }`.
+- `GET /api/status`: `locked`, `lockUntilUtc`, `remainingSeconds`, `machineName`.
+- `POST /api/lock`: JSON `{ "durationMinutes": 30 }`; returns the saved status.
+  Whole minutes from 1 through 720 are accepted. Invalid durations return HTTP 400;
+  a persistence failure returns HTTP 503 without accepting the new timer.
 
 ```powershell
-dotnet run --project .\LockService\LockService.csproj
+Invoke-RestMethod http://127.0.0.1:42831/api/health
+Invoke-RestMethod http://127.0.0.1:42831/api/status
+Invoke-RestMethod http://127.0.0.1:42831/api/lock -Method Post -ContentType application/json -Body '{"durationMinutes":1}'
 ```
 
-Then open another terminal and start the controller:
+## Exact manual verification
 
-```powershell
-dotnet run --project .\LockController\LockController.csproj
-```
+1. Start the service and controller using the development commands above. Verify
+   health returns success and the controller shows Connected. A fresh state file
+   starts UNLOCKED; an existing active timer is restored.
+2. Click each preset and check the textbox becomes 15, 30, 60, or 120. Enter `0`,
+   then click LOCK PC: validation must prevent a request. Repeat with `721` and text.
+3. Set 30, click LOCK PC, and choose No. The state must remain unchanged. Repeat
+   and choose Yes. Verify LOCKED, a decreasing HH:MM:SS countdown, and local unlock time.
+4. Inspect `Get-Content "$env:LOCALAPPDATA\FocusLock\state.json"`. Confirm schema 1,
+   `locked: true`, and a UTC deadline. Record the deadline.
+5. Press Ctrl+C in the service terminal. Leave the controller open: within a few
+   seconds it must show Disconnected and UNKNOWN with no stale countdown.
+6. Restart the service with the same development command and state directory.
+   Verify automatic reconnection, the identical deadline, and reduced remaining
+   time rather than a fresh 30 minutes.
+7. Enter 1 minute and confirm another lock. Wait for expiration: the UI must become
+   UNLOCKED and the file must contain `locked: false` and `lockUntilUtc: null`.
+8. Lock for 1 minute again, stop the service, wait over 60 seconds, then restart it.
+   Verify startup clears the expired state and the UI shows UNLOCKED.
+9. To test corruption, stop the service, then run
+   `Set-Content "$env:LOCALAPPDATA\FocusLock\state.json" 'invalid json'`.
+   Restart: verify an error is logged and status is UNLOCKED. Confirm a new lock
+   works and repairs the file.
+10. Close/reopen the controller and verify it obtains the current service state.
+    Throughout these tests, the Windows desktop and accounts remain usable.
 
-During early development, the service should only listen locally:
+## Future phases and license
 
-```text
-127.0.0.1:42831
-```
-
-This allows the controller and service to be tested safely on the same computer before LAN access is enabled.
-
-## Lock Timer Design
-
-FocusLock uses an absolute UTC expiration time rather than relying on an in-memory countdown.
-
-For example:
-
-```text
-Lock started:     14:00
-Duration:         60 minutes
-Lock expires:     15:00
-```
-
-The persisted state may look like:
-
-```json
-{
-  "schemaVersion": 1,
-  "locked": true,
-  "lockUntilUtc": "2026-09-26T12:00:00Z"
-}
-```
-
-If the computer restarts at 14:20, the service reads the saved expiration time after startup.
-
-Because the expiration time is still 15:00, the remaining lock continues instead of resetting.
-
-## Planned Architecture
-
-```text
-Administrator PC
-┌──────────────────────┐
-│ FocusLock Controller │
-└──────────┬───────────┘
-           │
-           │ authenticated HTTPS
-           │ local network
-           ▼
-Target Windows PC
-┌──────────────────────┐
-│ FocusLock Service    │
-│                      │
-│ Persistent timer     │
-│ Authentication       │
-│ Account management   │
-└──────────────────────┘
-```
-
-## Development Roadmap
-
-### Phase 1 — Controller and Timer
-
-* WPF controller UI
-* local HTTP API
-* lock duration selection
-* persistent UTC expiration time
-* restart-safe lock state
-* automated tests
-
-### Phase 2 — Windows Account Management
-
-* configure one target Standard user
-* verify the account exists
-* reject Administrator accounts
-* disable the target account during a lock
-* log out the target user's active session
-* automatically re-enable the account when the timer expires
-
-### Phase 3 — LAN Security
-
-* HTTPS
-* HMAC-SHA256 request authentication
-* timestamp validation
-* nonce/replay protection
-* secure secret storage
-* certificate validation
-
-### Phase 4 — Windows Service
-
-* install LockService as a Windows Service
-* automatic startup
-* service restart recovery
-* Windows Firewall configuration
-
-### Phase 5 — Deployment
-
-* install LockService on the target PC
-* install LockController on the administrator PC
-* configure LAN addressing
-* test restart persistence
-* test recovery procedure
-
-## Security Model
-
-FocusLock is intended to restrict a **Standard Windows user account**.
-
-The target user should not have administrator privileges.
-
-A separate administrator account should always remain available for recovery.
-
-FocusLock is not intended to prevent a Windows administrator from:
-
-* stopping the service
-* uninstalling the software
-* enabling the restricted account manually
-* using Windows Recovery
-* reinstalling Windows
-
-The software should never attempt to interfere with Windows recovery mechanisms, BitLocker recovery, BIOS/UEFI access, Safe Mode, external boot devices, security software, or administrator recovery.
-
-## Safety
-
-Before enabling real Windows account restrictions, test everything using a temporary Standard Windows account.
-
-Never test account-disable functionality using your only administrator account.
-
-Recommended setup:
-
-```text
-ParentAdmin     Administrator
-Brother         Standard User
-```
-
-FocusLock should only ever manage the explicitly configured Standard user.
-
-## Sensitive Files
-
-Do not commit:
-
-* shared authentication secrets
-* HTTPS private keys
-* `.pfx` certificates
-* `.pem` private keys
-* local configuration containing secrets
-* runtime lock state
-
-These files are excluded by `.gitignore`.
-
-## Emergency Recovery
-
-Once Windows account management is implemented, the project should include an administrator-only recovery script.
-
-The recovery procedure should remain approximately:
-
-```text
-1. Sign in using the recovery Administrator account.
-2. Stop the FocusLock service.
-3. Enable the target Standard account.
-4. Back up or remove the active FocusLock state file.
-5. Restart the service if required.
-```
-
-FocusLock should never intentionally prevent an administrator from performing this recovery.
-
-## License
-MIT License
-
-Copyright (c) 2026 Камен Железарски
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+LAN authentication, account management, service installation, and deployment remain
+future work. No Windows account restrictions or LAN access are implemented here.
+FocusLock is licensed under the [MIT license](LICENSE).

@@ -1,12 +1,50 @@
 ﻿<Window x:Class="LockController.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        xmlns:local="clr-namespace:LockController"
-        mc:Ignorable="d"
-        Title="MainWindow" Height="450" Width="800">
-    <Grid>
-
-    </Grid>
+        Title="FocusLock" Width="480" Height="620" MinWidth="440" MinHeight="600"
+        Background="#F3F5F9" FontFamily="Segoe UI" Loaded="Window_Loaded" Closed="Window_Closed">
+    <Window.Resources>
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="12,10"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+        <Style TargetType="TextBlock">
+            <Setter Property="Margin" Value="0,0,0,8"/>
+        </Style>
+    </Window.Resources>
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="28">
+            <TextBlock Text="FocusLock" FontSize="32" FontWeight="Bold" Foreground="#182740"/>
+            <TextBlock Text="Development preview · timer only" Foreground="#536176"/>
+            <StackPanel Orientation="Horizontal" Margin="0,12,0,14">
+                <TextBlock Text="Connection status:  "/>
+                <TextBlock x:Name="ConnectionText" Text="Disconnected" FontWeight="SemiBold"/>
+            </StackPanel>
+            <Border Background="White" CornerRadius="12" Padding="20" Margin="0,0,0,22">
+                <StackPanel>
+                    <TextBlock Text="Current state" Foreground="#536176"/>
+                    <TextBlock x:Name="StateText" Text="UNKNOWN" FontSize="28" FontWeight="Bold"/>
+                    <StackPanel x:Name="CountdownPanel" Visibility="Collapsed">
+                        <TextBlock Text="Time remaining"/>
+                        <TextBlock x:Name="RemainingText" FontSize="30" FontFamily="Consolas"/>
+                        <TextBlock Text="Unlock time (local)"/>
+                        <TextBlock x:Name="UnlockText"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+            <UniformGrid Columns="4" Margin="0,0,0,18">
+                <Button Content="15 min" Tag="15" Click="Preset_Click"/>
+                <Button Content="30 min" Tag="30" Click="Preset_Click"/>
+                <Button Content="1 hour" Tag="60" Click="Preset_Click"/>
+                <Button Content="2 hours" Tag="120" Click="Preset_Click" Margin="0"/>
+            </UniformGrid>
+            <Label Content="Custom minutes (1–720)" Target="{Binding ElementName=MinutesText}" Padding="0,0,0,8"/>
+            <TextBox x:Name="MinutesText" Text="30" FontSize="18" Padding="10" Margin="0,0,0,16"/>
+            <Button x:Name="LockButton" Content="LOCK PC" Click="Lock_Click" IsEnabled="False"
+                    Background="#2159B5" Foreground="White" FontWeight="Bold" Margin="0"/>
+            <TextBlock x:Name="MessageText" TextWrapping="Wrap" Foreground="#536176" Margin="0,14,0,0"
+                       Text="Waiting for the local service…"/>
+        </StackPanel>
+    </ScrollViewer>
 </Window>
