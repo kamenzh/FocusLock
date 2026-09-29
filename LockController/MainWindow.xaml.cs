@@ -15,6 +15,7 @@ public partial class MainWindow : Window
     private bool submitting;
     private bool connected;
     private int requestVersion;
+    private bool canLock;
 
     public MainWindow() => InitializeComponent();
 
@@ -63,18 +64,25 @@ public partial class MainWindow : Window
     {
         connected = true;
         ConnectionText.Text = "Connected";
-        StateText.Text = status.Locked ? "LOCKED" : "UNLOCKED";
+        StateText.Text = status.RecoveryRequired ? "RECOVERY REQUIRED" : status.Locked ? "LOCKED" : "UNLOCKED";
+        ModeText.Text = !status.EnforcementEnabled ? "Development · timer only" : status.DryRun
+            ? $"Development · DryRun · {status.TargetUsername}" : $"Development · real enforcement · {status.TargetUsername}";
         CountdownPanel.Visibility = status.Locked ? Visibility.Visible : Visibility.Collapsed;
         var time = TimeSpan.FromSeconds(Math.Clamp(status.RemainingSeconds, 0, 43200));
         RemainingText.Text = $"{(int)time.TotalHours:00}:{time.Minutes:00}:{time.Seconds:00}";
         UnlockText.Text = status.LockUntilUtc?.ToLocalTime().ToString("f") ?? "";
-        MessageText.Text = "Timer simulation only. Windows accounts and sessions are unaffected.";
-        LockButton.IsEnabled = !submitting;
+        MessageText.Text = status.EnforcementMessage ?? (!status.EnforcementEnabled
+            ? "Timer simulation only. Windows accounts and sessions are unaffected."
+            : status.DryRun ? "Safety validation only. No account or session changes."
+            : "Use a disposable Standard test account. Keep an administrator session open for recovery.");
+        canLock = !status.RecoveryRequired && (!status.EnforcementEnabled || status.TargetAccountConfigured);
+        LockButton.IsEnabled = !submitting && canLock;
     }
 
     private void ShowDisconnected()
     {
         connected = false;
+        canLock = false;
         ConnectionText.Text = "Disconnected";
         StateText.Text = "UNKNOWN";
         CountdownPanel.Visibility = Visibility.Collapsed;
@@ -93,18 +101,24 @@ public partial class MainWindow : Window
             MessageBox.Show(this, "Enter a whole number from 1 through 720 minutes.", "Invalid duration", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
-        if (MessageBox.Show(this, $"Lock the PC for {minutes} minutes?", "FocusLock", MessageBoxButton.YesNo,
-            MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes) return;
         submitting = true;
         requestVersion++;
         LockButton.IsEnabled = false;
         try
         {
+            // Refresh the configured target and mode before presenting the loss-of-work warning.
+            var current = await client.GetFromJsonAsync<LockStatus>("api/status", lifetime.Token)
+                ?? throw new JsonException("Empty status response.");
+            ShowStatus(current);
+            if (!canLock) return;
+            if (MessageBox.Show(this, LockConfirmation.Create(current, minutes), "FocusLock", MessageBoxButton.YesNo,
+                MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes) return;
             using var response = await client.PostAsJsonAsync("api/lock", new LockRequest(minutes), lifetime.Token);
             if (!response.IsSuccessStatusCode)
             {
                 var error = await response.Content.ReadFromJsonAsync<ApiResult>(lifetime.Token);
                 MessageText.Text = error?.Message ?? $"Lock request failed ({(int)response.StatusCode}).";
+                MessageBox.Show(this, MessageText.Text, "FocusLock request failed", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
             var status = await response.Content.ReadFromJsonAsync<LockStatus>(lifetime.Token)
@@ -122,7 +136,7 @@ public partial class MainWindow : Window
         finally
         {
             submitting = false;
-            LockButton.IsEnabled = connected && !lifetime.IsCancellationRequested;
+            LockButton.IsEnabled = connected && canLock && !lifetime.IsCancellationRequested;
         }
     }
 

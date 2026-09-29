@@ -20,18 +20,30 @@ public sealed class JsonLockStateStore(ServiceSettings settings, ILogger<JsonLoc
                 !root.TryGetProperty("lockUntilUtc", out _))
                 throw new JsonException("Missing state fields.");
             var state = root.Deserialize<LockState>(JsonOptions);
-            if (state is null || state.SchemaVersion != 1 ||
+            if (state is null || state.SchemaVersion is not (1 or 2) ||
                 state.Locked != state.LockUntilUtc.HasValue ||
                 state.LockUntilUtc is { Offset: var offset } && offset != TimeSpan.Zero)
                 throw new JsonException("Invalid state schema or UTC timestamp.");
+            if (state.SchemaVersion == 1 && (state.TargetUsername is not null || state.TargetSid is not null ||
+                state.AccountDisabledByFocusLock || state.DisablePending || state.SimulatedEnforcement))
+                throw new JsonException("Legacy state cannot contain enforcement metadata.");
+            if (state.SchemaVersion == 2 && (!state.Locked ||
+                !AccountSafety.IsLocalUsername(state.TargetUsername) || state.TargetSid is null ||
+                !AccountSafety.IsOrdinaryAccountSid(state.TargetSid) ||
+                !root.TryGetProperty("accountDisabledByFocusLock", out _) ||
+                !root.TryGetProperty("disablePending", out _) ||
+                !root.TryGetProperty("simulatedEnforcement", out _) ||
+                (state.AccountDisabledByFocusLock ? 1 : 0) + (state.DisablePending ? 1 : 0) +
+                (state.SimulatedEnforcement ? 1 : 0) != 1))
+                throw new JsonException("Invalid enforcement metadata.");
             return state;
         }
         catch (FileNotFoundException) { return LockState.Unlocked; }
         catch (DirectoryNotFoundException) { return LockState.Unlocked; }
         catch (JsonException exception)
         {
-            logger.LogError(exception, "Corrupt state at {Path}; starting unlocked", path);
-            return LockState.Unlocked;
+            logger.LogError(exception, "Corrupt state at {Path}; no account actions are safe. Administrator recovery required for enforcement", path);
+            return LockState.Unlocked with { IsCorrupt = true };
         }
     }
 

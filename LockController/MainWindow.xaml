@@ -16,7 +16,7 @@
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Margin="28">
             <TextBlock Text="FocusLock" FontSize="32" FontWeight="Bold" Foreground="#182740"/>
-            <TextBlock Text="Development preview · timer only" Foreground="#536176"/>
+            <TextBlock x:Name="ModeText" Text="Development build · awaiting service" Foreground="#536176" TextWrapping="Wrap"/>
             <StackPanel Orientation="Horizontal" Margin="0,12,0,14">
                 <TextBlock Text="Connection status:  "/>
                 <TextBlock x:Name="ConnectionText" Text="Disconnected" FontWeight="SemiBold"/>
