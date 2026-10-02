@@ -11,8 +11,8 @@ public sealed class ServiceSettings
 
     public IPAddress Validate()
     {
-        if (!IPAddress.TryParse(ListenAddress, out var address) || !IPAddress.IsLoopback(address))
-            throw new InvalidOperationException("Service:ListenAddress must be a loopback IP address.");
+        if (!IPAddress.TryParse(ListenAddress, out var address) || !address.Equals(IPAddress.Loopback))
+            throw new InvalidOperationException("Phase 3 Service:ListenAddress must be 127.0.0.1.");
         if (Port is < 1 or > 65535)
             throw new InvalidOperationException("Service:Port must be between 1 and 65535.");
         StateDirectory = Environment.ExpandEnvironmentVariables(StateDirectory);

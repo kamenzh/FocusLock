@@ -97,3 +97,12 @@ artifacts/
 FocusLock.local.json
 BrotherPCControl.local.json
 .verification/
+
+# Phase 3 protected secrets and runtime security data
+*.dpapi
+*.secret
+shared-secret*.txt
+Secrets/
+nonce-cache.json
+security-audit*.jsonl
+appsettings.Secrets.json

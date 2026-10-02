@@ -1,8 +1,9 @@
 ﻿using System.Net.Http;
-using System.Net.Http.Json;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using FocusLock.Client;
+using FocusLock.Security;
 using Shared;
 
 namespace LockController;
@@ -10,12 +11,14 @@ namespace LockController;
 public partial class MainWindow : Window
 {
     private readonly CancellationTokenSource lifetime = new();
-    private HttpClient? client;
+    private HttpClient? http;
+    private FocusLockApiClient? client;
     private Task? pollingTask;
     private bool submitting;
     private bool connected;
     private int requestVersion;
     private bool canLock;
+    private bool canUnlock;
 
     public MainWindow() => InitializeComponent();
 
@@ -24,40 +27,36 @@ public partial class MainWindow : Window
         try
         {
             var settings = await ControllerSettings.LoadAsync(lifetime.Token);
-            client = new HttpClient { BaseAddress = settings.GetBaseAddress(), Timeout = TimeSpan.FromSeconds(3) };
+            http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
+                { BaseAddress = settings.GetBaseAddress(), Timeout = TimeSpan.FromSeconds(5) };
+            client = new FocusLockApiClient(http, new DpapiSecretStore(settings.SecretFile));
             pollingTask = PollAsync(lifetime.Token);
             await pollingTask;
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
         catch (Exception exception) when (exception is System.IO.IOException or UnauthorizedAccessException or JsonException or InvalidOperationException)
-        {
-            MessageText.Text = "Controller configuration error: " + exception.Message;
-        }
+        { MessageText.Text = "Controller configuration error: " + exception.Message; }
     }
 
-    private async Task PollAsync(CancellationToken cancellationToken)
+    private async Task PollAsync(CancellationToken ct)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
         do
         {
-            // Avoid showing an older poll response over a newly submitted lock.
-            if (!submitting) await RefreshAsync(cancellationToken);
-        } while (await timer.WaitForNextTickAsync(cancellationToken));
+            if (!submitting) await RefreshAsync(ct);
+        } while (await timer.WaitForNextTickAsync(ct));
     }
 
-    private async Task RefreshAsync(CancellationToken cancellationToken)
+    private async Task RefreshAsync(CancellationToken ct)
     {
         var version = requestVersion;
         try
         {
-            var status = await client!.GetFromJsonAsync<LockStatus>("api/status", cancellationToken)
-                ?? throw new JsonException("Empty status response.");
+            var status = await client!.GetStatusAsync(ct);
             if (!submitting && version == requestVersion) ShowStatus(status);
         }
-        catch (Exception exception) when (exception is HttpRequestException or JsonException or OperationCanceledException)
-        {
-            if (!cancellationToken.IsCancellationRequested && !submitting && version == requestVersion) ShowDisconnected();
-        }
+        catch (FocusLockApiException exception)
+        { if (!submitting && version == requestVersion) ShowFailure(exception); }
     }
 
     private void ShowStatus(LockStatus status)
@@ -76,68 +75,83 @@ public partial class MainWindow : Window
             : status.DryRun ? "Safety validation only. No account or session changes."
             : "Use a disposable Standard test account. Keep an administrator session open for recovery.");
         canLock = !status.RecoveryRequired && (!status.EnforcementEnabled || status.TargetAccountConfigured);
-        LockButton.IsEnabled = !submitting && canLock;
+        canUnlock = status.Locked && !status.RecoveryRequired;
+        UpdateButtons();
     }
 
-    private void ShowDisconnected()
+    private void ShowFailure(FocusLockApiException exception)
     {
         connected = false;
-        canLock = false;
-        ConnectionText.Text = "Disconnected";
+        canLock = canUnlock = false;
+        ConnectionText.Text = exception.Kind switch
+        {
+            ApiFailureKind.Authentication => "Authentication error",
+            ApiFailureKind.Unreachable => "Disconnected",
+            _ => "API error"
+        };
         StateText.Text = "UNKNOWN";
         CountdownPanel.Visibility = Visibility.Collapsed;
-        LockButton.IsEnabled = false;
-        MessageText.Text = "Cannot reach the service. Retrying automatically…";
+        MessageText.Text = exception.Message;
+        UpdateButtons();
     }
 
-    private void Preset_Click(object sender, RoutedEventArgs e) =>
-        MinutesText.Text = (string)((Button)sender).Tag;
+    private void UpdateButtons()
+    {
+        LockButton.IsEnabled = connected && canLock && !submitting && !lifetime.IsCancellationRequested;
+        UnlockButton.IsEnabled = connected && canUnlock && !submitting && !lifetime.IsCancellationRequested;
+    }
+
+    private void Preset_Click(object sender, RoutedEventArgs e) => MinutesText.Text = (string)((Button)sender).Tag;
 
     private async void Lock_Click(object sender, RoutedEventArgs e)
     {
-        if (submitting || client is null) return;
         if (!int.TryParse(MinutesText.Text, out var minutes) || minutes is < 1 or > 720)
         {
             MessageBox.Show(this, "Enter a whole number from 1 through 720 minutes.", "Invalid duration", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
+        await ExecuteCommandAsync(async current =>
+        {
+            if (!canLock || MessageBox.Show(this, LockConfirmation.Create(current, minutes), "FocusLock", MessageBoxButton.YesNo,
+                MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes) return null;
+            return await client!.LockAsync(minutes, lifetime.Token);
+        });
+    }
+
+    private async void Unlock_Click(object sender, RoutedEventArgs e)
+    {
+        await ExecuteCommandAsync(async current =>
+        {
+            if (!canUnlock) return null;
+            var dialog = new UnlockConfirmationWindow(current.TargetUsername ?? "the active FocusLock timer") { Owner = this };
+            if (dialog.ShowDialog() != true) return null;
+            return await client!.UnlockAsync(lifetime.Token);
+        });
+    }
+
+    private async Task ExecuteCommandAsync(Func<LockStatus, Task<LockStatus?>> command)
+    {
+        if (submitting || client is null) return;
         submitting = true;
         requestVersion++;
-        LockButton.IsEnabled = false;
+        UpdateButtons();
         try
         {
-            // Refresh the configured target and mode before presenting the loss-of-work warning.
-            var current = await client.GetFromJsonAsync<LockStatus>("api/status", lifetime.Token)
-                ?? throw new JsonException("Empty status response.");
+            var current = await client.GetStatusAsync(lifetime.Token);
             ShowStatus(current);
-            if (!canLock) return;
-            if (MessageBox.Show(this, LockConfirmation.Create(current, minutes), "FocusLock", MessageBoxButton.YesNo,
-                MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes) return;
-            using var response = await client.PostAsJsonAsync("api/lock", new LockRequest(minutes), lifetime.Token);
-            if (!response.IsSuccessStatusCode)
-            {
-                var error = await response.Content.ReadFromJsonAsync<ApiResult>(lifetime.Token);
-                MessageText.Text = error?.Message ?? $"Lock request failed ({(int)response.StatusCode}).";
-                MessageBox.Show(this, MessageText.Text, "FocusLock request failed", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-            var status = await response.Content.ReadFromJsonAsync<LockStatus>(lifetime.Token)
-                ?? throw new JsonException("Empty lock response.");
-            ShowStatus(status);
+            var result = await command(current);
+            if (result is not null) ShowStatus(result);
         }
-        catch (Exception exception) when (exception is HttpRequestException or JsonException or OperationCanceledException)
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch (FocusLockApiException exception)
         {
+            ShowFailure(exception);
+            if (exception.Kind == ApiFailureKind.Unreachable)
+                MessageText.Text += " A submitted command may have completed; polling will verify the current state.";
             if (!lifetime.IsCancellationRequested)
-            {
-                ShowDisconnected();
-                MessageText.Text = "Lock response unavailable. The request may have been saved; reconnecting to verify.";
-            }
+                MessageBox.Show(this, MessageText.Text, "FocusLock request failed", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
-        finally
-        {
-            submitting = false;
-            LockButton.IsEnabled = connected && canLock && !lifetime.IsCancellationRequested;
-        }
+        finally { submitting = false; UpdateButtons(); }
     }
 
     private async void Window_Closed(object? sender, EventArgs e)
@@ -148,6 +162,6 @@ public partial class MainWindow : Window
             try { await pollingTask; }
             catch (OperationCanceledException) { }
         }
-        client?.Dispose();
+        http?.Dispose();
     }
 }

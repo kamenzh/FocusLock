@@ -2,6 +2,7 @@
 using System.Security.Principal;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shared;
+using LockService.Security;
 
 namespace LockService;
 
@@ -13,19 +14,24 @@ public sealed class LockManager
     private readonly AccountEnforcementSettings settings;
     private readonly IAccountManager? accounts;
     private readonly ILogger<LockManager> logger;
+    private readonly ISecurityAudit audit;
+    private readonly IRestrictionPolicy policy;
     private readonly SemaphoreSlim gate = new(1, 1);
     private LockState state = LockState.Unlocked;
     private bool recoveryRequired;
     private string? enforcementMessage;
 
     public LockManager(IClock clock, ILockStateStore store, AccountEnforcementSettings? settings = null,
-        IAccountManager? accounts = null, ILogger<LockManager>? logger = null)
+        IAccountManager? accounts = null, ILogger<LockManager>? logger = null,
+        ISecurityAudit? audit = null, IRestrictionPolicy? policy = null)
     {
         this.clock = clock;
         this.store = store;
         this.settings = settings ?? new();
         this.accounts = accounts;
         this.logger = logger ?? NullLogger<LockManager>.Instance;
+        this.audit = audit ?? new NullSecurityAudit();
+        this.policy = policy ?? new ManualLockPolicy();
     }
 
     private bool RealEnforcement => settings.Enabled && !settings.DryRun;
@@ -57,7 +63,7 @@ public sealed class LockManager
                         RequireRecovery("An enforced lock exists, but enforcement is disabled or DryRun is on. No account changes were made.");
                         return;
                     }
-                    if (state.LockUntilUtc > clock.UtcNow && state.AccountDisabledByFocusLock)
+                    if (policy.Evaluate(state, clock.UtcNow).Restricted && state.AccountDisabledByFocusLock)
                     {
                         if (target.Enabled)
                         {
@@ -67,7 +73,7 @@ public sealed class LockManager
                         try { await LogOffTargetSessionsAsync(); }
                         catch (EnforcementException) { /* Keep the expiration recovery path active. */ }
                     }
-                    else if (state.LockUntilUtc > clock.UtcNow && state.SimulatedEnforcement)
+                    else if (policy.Evaluate(state, clock.UtcNow).Restricted && state.SimulatedEnforcement)
                     {
                         // A dry-run timer can never become a real lock just because configuration changed.
                         enforcementMessage = "Restored a simulated lock; no account changes will be made for this timer.";
@@ -103,6 +109,7 @@ public sealed class LockManager
                 // recovery marker so later enabling enforcement cannot hide a corrupt-state incident.
                 await SaveAsync(new LockState(1, true, clock.UtcNow.AddMinutes(minutes))
                     { RecoveryRequired = recoveryRequired });
+                audit.Record(SecurityEvent.LockAccepted, "TimerOnly");
                 return Status();
             }
 
@@ -122,6 +129,7 @@ public sealed class LockManager
                 await DisableAndRecordAsync();
                 await LogOffTargetSessionsAsync();
             }
+            audit.Record(SecurityEvent.LockAccepted, settings.DryRun ? "DryRun" : "Enforced");
             return Status();
         }
         catch (Exception exception) when (IsAccountFailure(exception))
@@ -143,6 +151,7 @@ public sealed class LockManager
             if (ValidatePersistedTarget().Enabled)
                 throw new EnforcementException("Disable verification failed: target is still enabled.");
             logger.LogInformation("Verified target {Target} is disabled", target.Username);
+            audit.Record(SecurityEvent.AccountDisabled);
         }
         catch (Exception exception) when (IsAccountFailure(exception))
         {
@@ -245,7 +254,31 @@ public sealed class LockManager
 
     private async Task ExpireCoreAsync()
     {
-        if (!state.Locked || state.LockUntilUtc > clock.UtcNow || (recoveryRequired && state.SchemaVersion == 2)) return;
+        if (!state.Locked || policy.Evaluate(state, clock.UtcNow).Restricted || (recoveryRequired && state.SchemaVersion == 2)) return;
+        if (await ReleaseCoreAsync()) audit.Record(SecurityEvent.TimerExpired);
+    }
+
+    public async Task<LockStatus> UnlockAsync(CancellationToken cancellationToken = default)
+    {
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (recoveryRequired || state.IsCorrupt || state.RecoveryRequired || state.DisablePending)
+                throw new EnforcementException("Administrator recovery is required; early unlock cannot establish safe account ownership.");
+            // A future composite policy may still restrict access after removing the manual lock.
+            if (policy.Evaluate(LockState.Unlocked, clock.UtcNow).Restricted)
+                throw new EnforcementException("Another restriction policy still requires the account to remain restricted.");
+            if (state.Locked && !await ReleaseCoreAsync())
+                throw new EnforcementException("Unable to safely unlock the configured target. Administrator recovery required.");
+            audit.Record(SecurityEvent.UnlockAccepted);
+            return Status();
+        }
+        finally { gate.Release(); }
+    }
+
+    private async Task<bool> ReleaseCoreAsync()
+    {
         if (state.SchemaVersion == 2)
         {
             try
@@ -257,24 +290,26 @@ public sealed class LockManager
                     if (!RealEnforcement) throw new EnforcementException("Recovery requires real enforcement to be enabled or the administrator recovery script.");
                     if (!target.Enabled)
                     {
-                        logger.LogInformation("Enabling configured target {Target} at expiration", target.Username);
+                        logger.LogInformation("Enabling configured target {Target} as its restriction ends", target.Username);
                         accounts!.EnableTarget(target.Sid);
                     }
                     if (!ValidatePersistedTarget().Enabled) throw new EnforcementException("Enable verification failed.");
                     logger.LogInformation("Verified target {Target} is enabled", target.Username);
+                    audit.Record(SecurityEvent.AccountEnabled);
                 }
                 else if (state.SimulatedEnforcement)
-                    logger.LogInformation("DryRun timer expired; no enable operation was performed for {Target}", target.Username);
+                    logger.LogInformation("DryRun restriction ended; no enable operation was performed for {Target}", target.Username);
             }
             catch (Exception exception) when (IsAccountFailure(exception))
             {
-                RequireRecovery("Expiration could not safely restore the target. State retained for administrator recovery.", exception);
-                return;
+                RequireRecovery("Could not safely restore the target. State retained for administrator recovery.", exception);
+                return false;
             }
         }
         await SaveAsync(LockState.Unlocked with { RecoveryRequired = recoveryRequired });
         if (!recoveryRequired) enforcementMessage = null;
-        logger.LogInformation("Lock state cleared after expiration");
+        logger.LogInformation("Manual restriction cleared");
+        return true;
     }
 
     private async Task SaveAsync(LockState next)
@@ -295,10 +330,12 @@ public sealed class LockManager
 
     private LockStatus Status()
     {
-        var remaining = state.LockUntilUtc is { } until
+        var decision = policy.Evaluate(state, clock.UtcNow);
+        var remaining = decision.UntilUtc is { } until
             ? Math.Max(0, (long)Math.Ceiling((until - clock.UtcNow).TotalSeconds)) : 0;
-        return new(remaining > 0, remaining > 0 ? state.LockUntilUtc : null, remaining, Environment.MachineName)
+        return new(decision.Restricted, decision.UntilUtc, remaining, Environment.MachineName)
         {
+            RestrictionSource = decision.Source?.ToString(),
             EnforcementEnabled = settings.Enabled,
             DryRun = settings.DryRun,
             TargetAccountConfigured = AccountSafety.IsLocalUsername(settings.TargetUsername),

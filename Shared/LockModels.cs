@@ -10,5 +10,6 @@ public sealed record LockStatus(bool Locked, DateTimeOffset? LockUntilUtc, long 
     public string? TargetUsername { get; init; }
     public bool RecoveryRequired { get; init; }
     public string? EnforcementMessage { get; init; }
+    public string? RestrictionSource { get; init; }
 }
 public sealed record ApiResult(bool Success, string Message);

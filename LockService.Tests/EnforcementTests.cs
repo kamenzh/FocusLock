@@ -7,7 +7,7 @@ using Xunit;
 
 namespace LockService.Tests;
 
-public sealed class EnforcementTests
+public sealed partial class EnforcementTests
 {
     [Fact]
     public async Task DefaultsKeepPhaseOneAndNeverReadOrModifyAccounts()

@@ -1,55 +1,41 @@
-﻿# FocusLock — Phase 2 development build
+# FocusLock — Phase 3 development build
 
-FocusLock remains the existing .NET 9 solution: `LockService`, `LockController`,
-`Shared`, and `LockService.Tests`. Phase 1 timers still work with the defaults.
-Phase 2 adds opt-in enforcement of **one configured local Standard account**.
+FocusLock extends the existing .NET 9 `BrotherPCControl.sln`: `LockService`,
+`LockController`, `Shared`, and `LockService.Tests`. Phase 3 adds authenticated
+commands, replay protection, and administrator-controlled early unlock. Existing
+UTC persistence, configured Standard-account enforcement, and administrator
+recovery remain available.
 
-**First tests must use a disposable Standard account named `FocusLockTest`.
-Do not configure your real target account yet. Keep a separate local administrator
-session open. Do not test a reboot yet: reboot testing waits for Phase 4, when
-LockService is installed as an automatically starting Windows Service.**
+The service **only listens on `http://127.0.0.1:42831`**. Both applications reject
+other hosts/addresses in this phase. No firewall rules or LAN listeners are added.
+LAN deployment comes after authentication has been tested, with transport security
+and service installation/provisioning addressed in Phase 4.
 
-If you stop the development service process while the test account is disabled,
-its timer cannot re-enable that account until the service runs again. Restart the
-service with the same configuration/state directory, or use the administrator
-recovery script below. Closing the controller does not stop the service.
+## Architecture
 
-## Architecture and boundaries
+- **Shared** contains public DTOs, canonical HMAC encoding, `ISecretStore`, the
+  Windows DPAPI implementation, and `FocusLockApiClient`. DTOs contain no keys.
+- **LockService** runs the ASP.NET Core API and periodic expiration worker.
+  `IRequestAuthenticator` checks signatures using `IClock` and `INonceStore`,
+  before the endpoint binds the body or changes state. Lock, unlock, startup
+  recovery, and expiration share the existing `LockManager` semaphore.
+- **LockController** signs every protected request, polls asynchronously about
+  once per second, and distinguishes Authentication error, Disconnected, and
+  API error. Commands require confirmation and cannot overlap in the UI.
+- **LockService.Tests** exercises persistence, account safety using fake accounts,
+  cryptography, replay, real in-process HTTP routing, the shared client, DPAPI,
+  auditing, and lock/unlock/expiration races. Tests do not disable real accounts.
 
-- **Shared**: duration-only requests, status/results, and confirmation wording.
-- **LockService**: ASP.NET Core API, one-second expiration worker, dependency-injected
-  clock, state store, and `IAccountManager`. `WindowsAccountManager` uses local SAM
-  and WTS APIs through P/Invoke; no shell or command execution is exposed.
-- **LockController**: asynchronous WPF polling, presets/custom minutes, current
-  mode/target, explicit confirmation, and recovery-required status.
-- **LockService.Tests**: existing Phase 1 tests plus fake-account enforcement tests
-  and real JSON persistence tests. No test disables an actual Windows account.
-
-The listener stays on `http://127.0.0.1:42831`. Non-loopback addresses and additional
-Kestrel endpoints are refused; endpoint configuration reloads cannot add listeners.
-This phase has no LAN access, HMAC, firewall changes, service installation, or
-anti-uninstall/recovery behavior. Local callers can request a lock of the configured
-test account; there is no authentication yet. Only the configured duration can be
-sent over HTTP, and unknown request properties (including usernames) are rejected.
-
-The service identifies the built-in Administrators group using `S-1-5-32-544`,
-resolves its localized name, and checks direct/indirect group membership. It refuses
-missing/nonlocal accounts, administrators, the recovery administrator, the service
-identity, built-in/system accounts, and an account that is already disabled at the
-start of a new lock. Domain controllers are unsupported. Mutating Windows methods
-revalidate the configured identity and expected SID immediately before operations.
-Session logout selects only local interactive sessions matching that SID, excludes
-session zero, and checks session ownership again immediately before WTS logoff.
-
-Windows interop references: [NetUserSetInfo](https://learn.microsoft.com/en-us/windows/win32/api/lmaccess/nf-lmaccess-netusersetinfo),
-[USER_INFO_23](https://learn.microsoft.com/en-us/windows/win32/api/lmaccess/ns-lmaccess-user_info_23),
-[NetUserGetLocalGroups](https://learn.microsoft.com/en-us/windows/win32/api/lmaccess/nf-lmaccess-netusergetlocalgroups),
-and [WTSLogoffSession](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtslogoffsession).
+`IRestrictionPolicy` evaluates a `RestrictionDecision` independently of HTTP.
+`ManualLockPolicy` implements current timers; `RestrictionKind` reserves manual
+lock, daily allowance, and scheduled restriction. Early unlock checks whether
+another policy would still restrict access after removing the manual timer.
+Daily usage tracking and schedules are not implemented.
 
 ## Build and test
 
-Use Windows and the .NET 9 SDK/desktop runtime. Close existing development service
-and controller processes before rebuilding their binaries. From the repository root:
+Use Windows and the .NET 9 SDK/desktop runtime. Close development service and
+controller processes before building their binaries. From the repository root:
 
 ```powershell
 dotnet restore BrotherPCControl.sln
@@ -57,231 +43,326 @@ dotnet build BrotherPCControl.sln
 dotnet test BrotherPCControl.sln
 ```
 
-## Configuration
+## Generate and protect the shared secret
 
-`LockService/appsettings.json` ships with:
+Run setup from the separate **local administrator account** that will run the
+service and controller in development. Possession of this key authorizes both
+lock and early unlock; do not provision it to the restricted Standard account.
+HMAC proves possession of the key, not membership of a Windows group.
 
-```json
-"AccountEnforcement": {
-  "Enabled": false,
-  "TargetUsername": "",
-  "RecoveryAdminUsername": "",
-  "DryRun": true
-}
-```
-
-The blank target intentionally requires explicit administrator configuration. Use
-unqualified local names, not `DOMAIN\user` or an email address. Account settings are
-snapshotted on process startup; restart after changing them. Do not change target
-identity, enforcement mode, or state directory during a real lock. A new request
-cannot overwrite a pending or enforced lock; wait for expiration or recover it.
-
-- `Enabled=false`: Phase 1 timer only; no account inspection or mutation for new timers.
-- `Enabled=true`, `DryRun=true`: validate the target and enumerate its sessions; log
-  exactly which disable/signout/expiration-enable actions WOULD happen. No account
-  is disabled or enabled and nobody is signed out.
-- `Enabled=true`, `DryRun=false`: real enforcement, requiring an elevated service
-  process and a safely configured target.
-
-Service settings remain `Service:ListenAddress`, `Port`, and `StateDirectory`.
-The normal state path is `%ProgramData%\FocusLock\state.json`. An optional local
-`appsettings.Development.json` can override it. The walkthrough explicitly chooses
-`%LOCALAPPDATA%\FocusLock-Phase2` to avoid ambiguity. Environment variables use
-names such as `Service__StateDirectory` or `AccountEnforcement__DryRun`; command-line
-settings have higher priority. Prefer the documented JSON configuration for account
-names so recovery reads the same target. Keep service config and the chosen state
-directory writable only by trusted administrators/the service identity, not the target.
-
-Controller settings in `LockController/appsettings.json` remain `TargetHostname`
-and `Port`, defaulting to `127.0.0.1` and `42831`.
-
-## Prepare a disposable Standard account
-
-Open **64-bit Windows PowerShell as Administrator**, using a separate **local
-administrator account**, and switch to this repository. Run these once:
+The exact generation command is:
 
 ```powershell
-$password = Read-Host 'Password for disposable FocusLockTest' -AsSecureString
-New-LocalUser -Name 'FocusLockTest' -Password $password -Description 'Disposable FocusLock Phase 2 test account'
-Add-LocalGroupMember -SID 'S-1-5-32-545' -Member "$env:COMPUTERNAME\FocusLockTest"
-Get-LocalUser -Name FocusLockTest | Select-Object Name, Enabled
+.\scripts\Generate-SharedSecret.ps1
 ```
 
-Do not add it to Administrators. If that name already exists, inspect it before
-using it; do not repurpose an account containing real work. Group SID `S-1-5-32-545`
-selects the local Users group independently of the Windows display language.
-
-Configure DryRun from that administrator session:
+This outputs base64 representing 32 cryptographically random bytes. Prefer the
+following pipeline to generate one key and protect both local copies without
+printing the key or placing its literal value in PowerShell command history:
 
 ```powershell
-$configPath = Join-Path (Get-Location) 'LockService\appsettings.json'
-$config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-$config.AccountEnforcement.Enabled = $true
-$config.AccountEnforcement.TargetUsername = 'FocusLockTest'
-$config.AccountEnforcement.RecoveryAdminUsername = (Get-LocalUser -SID ([Security.Principal.WindowsIdentity]::GetCurrent().User)).Name
-$config.AccountEnforcement.DryRun = $true
-$config | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $configPath -Encoding UTF8
+.\scripts\Generate-SharedSecret.ps1 | .\scripts\Set-SharedSecret.ps1 -For Both
 ```
 
-Do not commit these enabled settings. Leave the shipped defaults disabled.
+`Set-SharedSecret.ps1` uses DPAPI **CurrentUser** with application-specific entropy.
+Its dedicated Secrets directory permits its owner, SYSTEM, and Administrators;
+plaintext key files are never written. The service and controller must run under
+the Windows identity that protected their respective copies. Elevating a terminal
+for the same Windows user does not change that identity. A different user cannot
+simply copy and decrypt these DPAPI files.
 
-## Exact DryRun procedure
+Default protected copies:
 
-Start the service in the administrator terminal:
+| Application | Configuration | Default path |
+| --- | --- | --- |
+| Service | `Authentication:SecretFile` | `%LOCALAPPDATA%\FocusLock\Secrets\service.secret.dpapi` |
+| Controller | `SecretFile` | `%LOCALAPPDATA%\FocusLock\Secrets\controller.secret.dpapi` |
+
+For an already generated key held in a PowerShell variable, use:
 
 ```powershell
-dotnet run --project LockService --launch-profile LockService -- --Service:StateDirectory="$env:LOCALAPPDATA\FocusLock-Phase2"
+$focusLockSecret | .\scripts\Set-SharedSecret.ps1 -For Service
+$focusLockSecret | .\scripts\Set-SharedSecret.ps1 -For Controller
+Remove-Variable focusLockSecret
 ```
 
-In another terminal, start the controller:
+These must be copies of the **same** key; generating a new key independently for
+each application will fail authentication. For separate Windows identities,
+securely provision the same key and run each import under its intended identity.
+Do not pass literal keys on command lines, commit them, or put them in appsettings.
+`-SecretDirectory` supports a dedicated alternative folder; configure each
+application's `SecretFile` to match. Do not point it at a general-purpose directory,
+since the script restricts the directory ACL. DPAPI files and secret config files
+are ignored by Git. The repository contains only paths, never a real key.
+
+Missing, unreadable, or mismatched secrets make protected requests fail. The
+controller displays **Authentication error**. Minimal health and existing timer
+expiration/account restoration remain available even if the secret is missing.
+To rotate the key, stop both applications and provision matching fresh copies.
+Keep the state and nonce cache; key rotation must not discard account ownership.
+
+## Configuration and local startup
+
+Service settings are `Service:ListenAddress` (`127.0.0.1`), `Service:Port` (`42831`),
+`Service:StateDirectory` (normally `%ProgramData%\FocusLock`), and the secret path
+above. An ignored `appsettings.Development.json` may override the state directory.
+Controller settings are top-level JSON properties: `TargetHostname` (`127.0.0.1`), `Port`
+(`42831`), and `SecretFile`. Environment variables use double underscores, such as
+`Authentication__SecretFile` and `Service__StateDirectory`.
+
+**The current repository's service configuration enables real enforcement for
+`FocusLockTest`, with recovery administrator `msi`. This existing configuration
+was preserved.** The settings class defaults remain disabled enforcement and
+DryRun. Explicitly select the intended mode before starting the service:
+
+- `Enabled=false`: timer only, without account inspection or mutation for new locks.
+- `Enabled=true`, `DryRun=true`: validate the configured target and report intended
+  disable/signout/enable actions, without performing them.
+- `Enabled=true`, `DryRun=false`: real enforcement, requiring elevation and a
+  safely configured disposable Standard account.
+
+For the first authenticated test, start a **separate timer-only instance** using
+a dedicated state directory. Stop any development instance already using 42831.
+Do not abandon an outstanding real lock: expire, unlock, or recover it first.
+After generating both protected secret copies, run:
+
+```powershell
+dotnet run --project LockService --launch-profile LockService -- --Service:StateDirectory="$env:LOCALAPPDATA\FocusLock-Phase3" --AccountEnforcement:Enabled=false --AccountEnforcement:DryRun=true
+```
+
+From another terminal under the same administrator identity:
 
 ```powershell
 dotnet run --project LockController
 ```
 
-Verify the UI says **DryRun** and **FocusLockTest**. Enter 1 minute, press LOCK PC,
-and explicitly confirm. Alternatively, exercise the same duration-only API:
+These commands use the default protected secret paths. Check that the controller
+shows **Connected**, **UNLOCKED**, and **timer only** before testing. Closing the
+controller does not stop the service. Stop the service console using Ctrl+C.
+
+## Exact manual authentication, lock, and unlock checks
+
+1. Run the timer-only service and controller commands above. Open
+   `http://127.0.0.1:42831/api/health`; expect only `{"status":"ok"}`.
+2. An unsigned request must fail:
+   `Invoke-RestMethod http://127.0.0.1:42831/api/status` returns HTTP 401 with
+   `Authentication failed.` It must not expose status or change the timer.
+3. Choose 15, 30, 60, or 120 minutes and check that the custom minutes field follows
+   the preset. Try 0, 721, and non-numeric input; these must not create locks.
+4. Enter 2 minutes, press **LOCK PC**, and cancel. State must remain UNLOCKED.
+   Repeat and confirm: expect LOCKED, a decreasing HH:MM:SS countdown, and a local
+   unlock time. No account changes occur in timer-only mode.
+5. While locked, press **UNLOCK NOW**. The dialog names the configured target
+   (for example `Unlock FocusLockTest now?`) and warns:
+   `This will end the active FocusLock restriction early.` Choose **Cancel**;
+   the deadline and active lock must remain unchanged.
+6. Press **UNLOCK NOW** again and choose **Unlock**. Expect UNLOCKED on success,
+   no active deadline, and the button disabled. No target-user password is needed.
+   Escape and closing the confirmation dialog also cancel.
+7. Create a 2-minute lock, record the unlock time, stop only LockService, and
+   observe Disconnected. Restart the identical service command promptly. Expect
+   Connected with the original deadline, not a reset duration. Early unlock it.
+8. Create a 1-minute lock and let it expire; expect UNLOCKED. Repeat, stop the
+   service, wait past the deadline, then restart: expect UNLOCKED immediately.
+9. To check Authentication error, stop the controller and temporarily configure
+   its `SecretFile` to a nonexistent path. Restart it: expect
+   Authentication error while the public health URL still succeeds. Restore the
+   original path and restart; do not overwrite the service key for this test.
+10. Run the read-only replay check below. Inspect the structured audit log for
+    successful lock/unlock, authentication rejection, replay, and expiration.
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:42831/api/health
-Invoke-RestMethod http://127.0.0.1:42831/api/lock -Method Post -ContentType application/json -Body '{"durationMinutes":1}'
-Invoke-RestMethod http://127.0.0.1:42831/api/status
+.\scripts\Test-ReplayProtection.ps1
+Get-Content "$env:LOCALAPPDATA\FocusLock-Phase3\audit\security-audit.jsonl" -Tail 20
+```
+
+The replay script decrypts the controller copy, signs one GET `/api/status`, and
+sends exactly the same signed request twice. Expect HTTP 200 followed by HTTP 401.
+It performs no lock, unlock, or account changes. Optional `-SecretFile` and `-Port`
+match custom local settings. Automated tests additionally check altered bodies,
+durations, paths, methods, headers, signatures, past/future timestamps, concurrent
+replays, and replay detection after service restart.
+
+## Disposable-account enforcement and early unlock
+
+Keep a separate administrator session open. Use only a disposable Standard
+account, initially `FocusLockTest`. Do not test your real target account or a
+reboot yet; automatic Windows Service startup belongs to Phase 4. Stopping the
+development service while the account is disabled prevents expiration from
+restoring it until the process runs again or an administrator recovers it.
+
+To create a disposable account if it does not already exist, use **64-bit Windows
+PowerShell as Administrator**:
+
+```powershell
+$password = Read-Host 'Password for disposable FocusLockTest' -AsSecureString
+New-LocalUser -Name 'FocusLockTest' -Password $password -Description 'Disposable FocusLock test account'
+Add-LocalGroupMember -SID 'S-1-5-32-545' -Member "$env:COMPUTERNAME\FocusLockTest"
 Get-LocalUser -Name FocusLockTest | Select-Object Name, Enabled
 ```
 
-Expect `Enabled=True` throughout and no session signout. The service logs validation
-success and `DryRun: WOULD ...` actions. If the test account has no interactive
-session, there is no session to list. Wait for expiration and verify the UI becomes
-UNLOCKED. As a negative check, pointing DryRun at your local administrator must be
-refused with HTTP 409 and a validation error; restore `FocusLockTest` afterward.
+Inspect an existing account before using it. Do not add the target to
+Administrators. Configure `AccountEnforcement` in `LockService/appsettings.json`
+with `Enabled=true`, `TargetUsername="FocusLockTest"`, your separate local
+administrator's name in `RecoveryAdminUsername`, and initially `DryRun=true`.
+Keep configuration/state writable only by trusted administrators/the service
+identity. Do not change target, mode, or state directory during a real lock.
+Prefer configured account names over command-line overrides so recovery reads
+the same configuration. Never commit secrets with these settings.
 
-## Exact real FocusLockTest procedure
-
-Finish the DryRun timer, then stop its service with Ctrl+C. In the administrator
-terminal, change only DryRun (retain the target/recovery names configured above):
+After finishing the timer-only checks, stop that instance. For DryRun testing,
+start from an elevated terminal under the identity that provisioned the key:
 
 ```powershell
-$configPath = Join-Path (Get-Location) 'LockService\appsettings.json'
-$config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-$config.AccountEnforcement.DryRun = $false
-$config | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $configPath -Encoding UTF8
-Get-LocalUser -Name FocusLockTest | Select-Object Name, Enabled
-dotnet run --project LockService --launch-profile LockService -- --Service:StateDirectory="$env:LOCALAPPDATA\FocusLock-Phase2"
+dotnet run --project LockService --launch-profile LockService -- --Service:StateDirectory="$env:LOCALAPPDATA\FocusLock-Phase3-Enforcement" --AccountEnforcement:Enabled=true --AccountEnforcement:DryRun=true
 ```
 
-The account must initially be enabled. To test signout, sign in to the disposable
-account once, leave only disposable work there, and switch back to your separate
-administrator session. Keep the service and controller in that administrator session.
-
-Confirm the controller says **real enforcement · FocusLockTest**. Select 1 minute,
-press LOCK PC, read the warning that the account will be disabled and signed out and
-unsaved work may be lost, then choose Yes. Choosing No must leave state unchanged.
-The API equivalent, after you are ready for the target's session to be signed out, is:
+Use the controller for a 1-minute lock and an early unlock. Confirm the UI says
+DryRun and FocusLockTest; `Get-LocalUser -Name FocusLockTest` must remain enabled,
+with no signouts. For real testing, finish the timer and stop the process; ensure
+the configured account settings also have `Enabled=true` and `DryRun=false`, then:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:42831/api/lock -Method Post -ContentType application/json -Body '{"durationMinutes":1}'
-Get-LocalUser -Name FocusLockTest | Select-Object Name, Enabled
+dotnet run --project LockService --launch-profile LockService -- --Service:StateDirectory="$env:LOCALAPPDATA\FocusLock-Phase3-Enforcement" --AccountEnforcement:Enabled=true --AccountEnforcement:DryRun=false
 ```
 
-Expect `Enabled=False`. Only FocusLockTest sessions may be signed out. After one
-minute, run `Get-LocalUser -Name FocusLockTest` again: expect `Enabled=True`, an
-UNLOCKED UI, and cleared active state. Logs show disable/enable verification.
+If testing logout, sign in once to FocusLockTest with only disposable work, then
+switch back to the administrator session. Confirm the controller says real
+enforcement and FocusLockTest. Create a 2-minute lock and accept the warning:
+only that account should become disabled and only its sessions signed out.
+Cancel **UNLOCK NOW** once and check that it remains disabled. Confirm **Unlock**
+on the next attempt, then verify `Get-LocalUser -Name FocusLockTest` reports
+`Enabled=True`, the UI is UNLOCKED, and state no longer records an active lock.
+Create a 1-minute lock and let expiration restore it too. Audit output must show
+AccountDisabled and AccountEnabled in addition to the corresponding command or
+expiration events. Other accounts must remain unchanged.
 
-For **process restart** testing only, start a longer test lock, record its deadline,
-stop the development service, and promptly restart the identical command with the
-same configuration. The original deadline must remain. If restarting after expiry,
-the service restores the verified owned account before clearing state. **Do not
-reboot for this test. Automatic service startup belongs to Phase 4.**
+For restart persistence, use the same state directory/configuration and promptly
+restart the service during an active lock. The original deadline must remain.
+If restarting after expiration, the verified owned account is restored before
+state is cleared. Do not reboot for this development test.
 
-## Administrator recovery
+## Administrator recovery remains available
 
-The recovery script is intentionally accessible at `scripts/Recover-TargetAccount.ps1`.
-From the **same local administrator account** used to run this walkthrough, stop the
-development process with Ctrl+C, then run:
+Stop the development process with Ctrl+C. From the same separate administrator
+account, in an elevated terminal, run (using the **actual active state directory**):
 
 ```powershell
-.\scripts\Recover-TargetAccount.ps1 -Environment Development -StateDirectory "$env:LOCALAPPDATA\FocusLock-Phase2"
+.\scripts\Recover-TargetAccount.ps1 -Environment Development -StateDirectory "$env:LOCALAPPDATA\FocusLock-Phase3-Enforcement"
 Get-LocalUser -Name FocusLockTest | Select-Object Name, Enabled
 ```
 
-The script requires elevation, reads the configured username (there is no username
-argument), refuses administrator/built-in/system accounts, and stops an installed
-service named FocusLock or LockService if present. A state-directory lease detects
-an unclosed development process; it refuses recovery until that process stops.
-It enables only the validated configured account, verifies enabled state, and moves
-`state.json` to `state.recovered.<UTC timestamp>.json` in the same directory. This
-both backs up the incident and removes the active timer so restart cannot replay it.
-Every action is printed. It leaves the service stopped for configuration review.
+The recovery script requires elevation and reads the configured target; it accepts
+no arbitrary username. It refuses administrator/built-in/system accounts, stops
+an installed FocusLock/LockService if present, and requires the development
+process to have released its state-directory lease. It enables only the validated
+configured account, verifies the result, archives state as
+`state.recovered.<UTC timestamp>.json`, and leaves the service stopped for review.
+It does not depend on HMAC or the protected secret.
 
-For normal production-path configuration, use `-Environment Production` without
-`-StateDirectory`. If you used another state path on the service command line, pass
-that exact absolute path to the recovery script. It reads the base and environment
-JSON plus relevant environment-variable overrides; avoid account-name command-line
-overrides because they are not available to a separate recovery process. A persisted
-username/SID mismatch requires administrator review/restoring the original config;
-the script will not guess which account to manipulate. Corrupt JSON can be recovered
-using the validated configured account, with the original file archived afterward.
+For normal production-path configuration use `-Environment Production` without a
+state-directory override. If you used a custom directory, supply that exact path.
+The script reads base/environment JSON and environment-variable overrides, not
+another process's command-line account-name overrides. A username/SID mismatch
+requires administrator review and restoring the original configuration. Corrupt
+JSON can be recovered using the validated configured account and archived.
+Never delete active enforced state instead of restoring the account. After tests,
+recover outstanding locks and restore disabled enforcement/DryRun if desired.
 
-After testing, stop the service, recover any outstanding test lock, then restore
-`Enabled=false`, `DryRun=true`, and an empty `TargetUsername` in configuration.
-Never delete an active enforced state file as a substitute for restoring the account.
+## HMAC wire format and replay protection
 
-## Persistence and failure behavior
+Protected endpoints: GET `/api/status`, POST `/api/lock`, POST `/api/unlock`.
+Only GET `/api/health` is public, exposing no account, timer, or configuration data.
+Lock accepts only `{ "durationMinutes": 1 }`, with integer durations 1–720.
+Status and unlock require an empty body; unlock never accepts an account identifier.
+Unknown lock properties, including usernames, are rejected. Query strings are
+rejected for protected requests. Clients use the literal paths shown above.
 
-Timers always use absolute UTC deadlines, not a duration-long `Task.Delay`. State
-writes serialize to a unique temp file in the state directory, flush it to disk,
-then use `File.Move(temp, state, overwrite: true)`; temp cleanup runs in `finally`.
-An exclusive `service.lock` handle prevents two service/recovery processes from
-writing the same state directory. Windows closes the handle on process exit.
+Each request supplies:
 
-Legacy schema 1 state remains supported as timer-only state. It is never upgraded
-into an enforced lock merely because enforcement was enabled. Schema 2 adds:
-`targetUsername`, `targetSid`, `disablePending`, `accountDisabledByFocusLock`,
-`simulatedEnforcement`, and `recoveryRequired`.
+- `X-FocusLock-Timestamp`: canonical decimal UTC Unix seconds.
+- `X-FocusLock-Nonce`: 32 random bytes as 64 lowercase hexadecimal characters.
+- `X-FocusLock-Signature`: base64 HMAC-SHA256 of the canonical bytes below.
 
-A real lock first saves `disablePending=true`, then disables and verifies the account,
-then saves `accountDisabledByFocusLock=true` before requesting any session logoff.
-If disable fails and the target is verifiably still enabled, the intent is rolled
-back. No sessions are logged off on disable failure. If ownership is uncertain
-(including a crash between disabling and saving success), the intent stays on disk
-and automatic mutation stops with RECOVERY REQUIRED. This deliberately requires
-administrator recovery rather than enabling an account without verified ownership.
+Canonical encoding is UTF-8 **without BOM**, six lines separated by a single LF
+(`\n`), **without a trailing newline**:
 
-Expiration revalidates the configured name and recorded SID, enables only a verified
-owned account, verifies enabled state, then clears state. Re-enabling an already
-enabled account is harmless and does not issue an unnecessary write. An enable or
-identity validation failure retains state for recovery. Session logoff failure keeps
-the timer/ownership so expiration can still restore access.
+```text
+FocusLock-HMAC-SHA256-v1
+HTTP METHOD IN UPPERCASE
+exact request path
+X-FocusLock-Timestamp
+X-FocusLock-Nonce
+lowercase hexadecimal SHA256 of the exact transmitted body bytes
+```
 
-An active real lock restored on startup revalidates the account and ensures it is
-disabled. An active simulated lock stays simulated even if DryRun is switched off.
-Turning enforcement off or DryRun on while real ownership exists never enables or
-disables automatically: recovery is required. Never change the target while locked.
+The controller serializes the body once, signs those bytes, and sends the same
+bytes. GET/status and POST/unlock sign an empty body. The server independently
+hashes the received body (maximum 4096 bytes), reconstructs the value, and uses
+`CryptographicOperations.FixedTimeEquals` to compare authentication values.
+No raw headers, signature, or secret are logged. All authentication rejection
+responses are HTTP 401 with `Authentication failed.`; server diagnostics contain
+only failure categories. Ordinary input errors are 400, enforcement refusals 409,
+and persistence failures 503 with structured `ApiResult` responses.
 
-Corrupt state never causes account mutations and blocks enforcement until recovery.
-For Phase 1 compatibility, disabled-enforcement API clients can replace corrupt JSON
-with a simulated timer, but a durable recovery marker prevents later enforcement
-from hiding that incident. The UI prominently reports RECOVERY REQUIRED. SID details
-stay out of the public status response; no credentials are logged.
+Timestamps within +/-60 seconds are accepted, using injected `IClock`. A valid
+signature reserves the nonce atomically before endpoint execution. Nonce digests
+are retained through the last acceptable timestamp second, including future skew
+(up to 121 seconds), and persisted in `nonce-cache.json` before accepting a request.
+Thus restarting the service does not reopen an accepted nonce's validity window.
+A worker prunes expired entries every 15 seconds; capacity is 4096 live entries.
+A full, corrupt, or unavailable cache fails protected requests closed rather than
+dropping unexpired entries. Clients use fresh nonces for every poll and command;
+commands are not automatically retried after an uncertain network result.
 
-## API and Phase 1 checks
+HMAC authenticates requests; it does not encrypt HTTP or authenticate server
+responses. Loopback restriction remains mandatory. LAN support requires a separate
+transport-security and deployment review, not changing the hostname to a LAN IP.
 
-- `GET /api/health`: reports the running service.
-- `GET /api/status`: existing timer fields plus `enforcementEnabled`, `dryRun`,
-  `targetAccountConfigured`, configured display name `targetUsername`,
-  `recoveryRequired`, and an actionable `enforcementMessage`.
-- `POST /api/lock`: only `{ "durationMinutes": 1 }`, from 1 through 720. Invalid
-  input is HTTP 400; safety/enforcement failures are HTTP 409; disk errors are
-  reported as errors rather than accepting an unpersisted lock.
+## Persistence, account safety, and auditing
 
-With enforcement disabled, verify presets (15/30/60/120), invalid durations (0/721/
-text), cancellation, countdown, disconnect/reconnect, identical deadlines across
-process restarts, and expiration while stopped. Keep corruption experiments in a
-separate timer-only directory; use recovery rather than editing real enforced state.
+Timers use absolute UTC timestamps. State is written to a same-directory temp
+file, flushed to disk, then moved over `state.json` with
+`File.Move(temp, state, overwrite: true)` and cleanup in `finally`.
+The state-directory lease prevents concurrent service/recovery writers.
 
-The program does not attempt to defeat administrators, prevent removal, interfere
-with Safe Mode/Windows Recovery, change BitLocker/BIOS/UEFI, block recovery media,
-or tamper with security software. Administrator recovery remains available.
+Schema 1 remains timer-only, never implicitly becoming account enforcement.
+Schema 2 records configured username/SID, disable intent, verified ownership,
+simulation, and recovery flags. A real lock saves intent before disabling,
+verifies the result, and saves ownership before session logout. Uncertain ownership
+requires administrator recovery. Startup revalidates an active owned lock;
+expiration and early unlock validate the configured identity and recorded SID,
+enable only a proven owned account, verify enabled state, then clear the timer.
+An already unlocked request is idempotent and does not inspect/enable accounts.
+An account FocusLock did not disable is never enabled by early unlock.
+
+Name/SID conflicts, interrupted disable intent, corrupt state, or unsafe mode
+changes block early unlock and retain recovery information. Existing restrictions
+against administrator/recovery/service/system accounts remain. Session logout
+selects only matching local interactive sessions and rechecks ownership.
+Corrupt state cannot cause account mutations. Timer-only replacement preserves
+its recovery marker, preventing later enforcement from hiding the incident.
+
+Structured JSONL audit output is at `<StateDirectory>\audit\security-audit.jsonl`:
+UTC timestamp, event, and optional non-sensitive reason code. Events include
+LockAccepted, UnlockAccepted, AuthenticationRejected, ReplayRejected,
+AccountDisabled, AccountEnabled, and TimerExpired. Rotation keeps the current file
+and one previous file at approximately 5 MiB each. Audit-write failure logs an
+error without blocking account restoration. Protect this local diagnostic log;
+it is not a tamper-proof external security ledger.
+
+## Remaining Phase 4 work
+
+- Install/run an automatically starting Windows Service with deliberate identity,
+  permissions, recovery/startup behavior, and DPAPI provisioning for that identity.
+- Test reboot/crash behavior using the disposable account and available recovery.
+- Design secure LAN transport, server authentication, key provisioning/rotation,
+  and deployment limits before enabling any remote listener or firewall rule.
+- Implement daily allowance/usage tracking and scheduled policies separately.
+
+No arbitrary commands/processes/usernames, administrator disabling, anti-uninstall,
+Safe Mode/Windows Recovery restrictions, BitLocker/BIOS/UEFI changes, or security
+software tampering are provided. Administrator recovery remains accessible.
 
 ## License
 

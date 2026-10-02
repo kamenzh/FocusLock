@@ -43,6 +43,7 @@
             <TextBox x:Name="MinutesText" Text="30" FontSize="18" Padding="10" Margin="0,0,0,16"/>
             <Button x:Name="LockButton" Content="LOCK PC" Click="Lock_Click" IsEnabled="False"
                     Background="#2159B5" Foreground="White" FontWeight="Bold" Margin="0"/>
+            <Button x:Name="UnlockButton" Content="UNLOCK NOW" Click="Unlock_Click" IsEnabled="False" Margin="0,10,0,0"/>
             <TextBlock x:Name="MessageText" TextWrapping="Wrap" Foreground="#536176" Margin="0,14,0,0"
                        Text="Waiting for the local service…"/>
         </StackPanel>
